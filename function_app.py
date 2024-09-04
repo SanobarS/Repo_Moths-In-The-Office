@@ -1,12 +1,17 @@
 import logging
 import azure.functions as func
 import re
+import os
+import json
 import uuid
 import numpy as np
 from pinecone import Pinecone
 from openai import AzureOpenAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.docstore.document import Document
+from pydantic import BaseModel
+from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
+
 
 
 app = func.FunctionApp()
@@ -86,7 +91,10 @@ def trigger_risk_analytics(myblob: func.InputStream):
         "url": myblob.uri
     }
     
-    process_document(content, metadata)
+    risk_statements = process_document(content, metadata)
+
+    logging.info('Result:::::: ')
+    logging.info(risk_statements)
     
 
 ############## HELPERS ##############
@@ -192,6 +200,19 @@ def get_ai_response(prompt, model='gpt-4o'):
         )
         return response.choices[0].message.content
 
+
+def get_structured_ai_response(prompt, model='gpt-4o'):
+    try:
+        response = completionClient.beta.chat.completions.parse(
+            model=model,
+            messages=[{'role': 'user', 'content': prompt}],
+            response_format= { "type": "json_object" }
+        )
+
+        return response.choices[0].message.content
+    except Exception as e:
+        logging.info(e)
+
 def process_document(content, metadata):
     try:
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
@@ -200,6 +221,36 @@ def process_document(content, metadata):
         index.upsert(vectors=vectors, namespace="ns1")
         logging.info('Embeddings Synced with Pinecone')
 
-        #Add logic to suggest risk statements
+        if isinstance(content, bytes):
+            content = content.decode('utf-8')
+
+        prompt = 'You are a risk manager. Analyse the CONTENT_DETAILS and provide JSON array of possible risk statements (if any).'
+        prompt += '\nResult should be sorted as per the priority of the risks.'
+        prompt += '\nResponse Format: {"risks": list[str]}'
+        prompt += '\nCONTENT_DETAILS: '
+        prompt += '\n' + content
+
+        risk_statements = get_structured_ai_response(prompt)
+
+        connection_string = os.environ["031b3f_STORAGE"]
+        container_name = "risk-store"
+        blob_name = "possible-risk-statements.json"
+
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        blob_client = container_client.get_blob_client(blob_name)
+
+        blob_data = blob_client.download_blob().readall().decode('utf-8')
+        logging.info(blob_data)
+
+        result_data = metadata | json.loads(risk_statements)
+        result_data = [result_data]
+
+        if len(blob_data) > 0:
+            blob_data = json.loads(blob_data)
+            result_data = blob_data + result_data
+
+        blob_client.upload_blob(json.dumps(result_data), overwrite=True)
+        logging.info('possible-risk-statements updated')
     except Exception as e:
         logging.info(e)

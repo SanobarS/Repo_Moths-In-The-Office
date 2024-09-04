@@ -6,3 +6,4 @@ azure-functions
 pinecone
 openai
 langchain
+azure-storage-blob
