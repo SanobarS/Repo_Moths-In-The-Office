@@ -200,6 +200,6 @@ def process_document(content, metadata):
         index.upsert(vectors=vectors, namespace="ns1")
         logging.info('Embeddings Synced with Pinecone')
 
-        
+        #Add logic to suggest risk statements
     except Exception as e:
         logging.info(e)
