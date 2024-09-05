@@ -9,12 +9,12 @@ from pinecone import Pinecone
 from openai import AzureOpenAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.docstore.document import Document
-from pydantic import BaseModel
-from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
+from azure.storage.blob import BlobServiceClient
 
 
 
 app = func.FunctionApp()
+azure_storage_connection_string = os.environ["031b3f_STORAGE"]
 pc = Pinecone(api_key='51f2a1bb-18c5-4349-bacc-16edb5da183d')
 index = pc.Index('test-python-embeddings')
 completionClient = AzureOpenAI(
@@ -78,6 +78,24 @@ def get_risk_controls(req: func.HttpRequest) -> func.HttpResponse:
     else:
         return func.HttpResponse(res_risk_controls, status_code=200)
     
+
+@app.route(route="upload_document", auth_level=func.AuthLevel.FUNCTION)
+def upload_document(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function processed a request.')
+
+    if 'file' not in req.files:
+        return {'error': 'No file part in the request'}, 400
+    file = req.files['file']
+    
+    if file.filename == '':
+        return {'error': 'No file selected for uploading'}, 400
+
+    if upload_document(file):
+        return func.HttpResponse('success', status_code=200)
+    else:
+        return func.HttpResponse(status_code=500)
+
+    
 @app.blob_trigger(arg_name="myblob", path="moths-in-the-office",
                                connection="031b3f_STORAGE") 
 def trigger_risk_analytics(myblob: func.InputStream):
@@ -91,10 +109,7 @@ def trigger_risk_analytics(myblob: func.InputStream):
         "url": myblob.uri
     }
     
-    risk_statements = process_document(content, metadata)
-
-    logging.info('Result:::::: ')
-    logging.info(risk_statements)
+    process_document(content, metadata)
     
 
 ############## HELPERS ##############
@@ -183,7 +198,6 @@ def get_embedding(text, metadata = {}, model="text-embedding-ada-002"):
     embeddings = embeddingsClient.embeddings.create(input=[text], model=model)
 
     metadata = { "chunk": text } | metadata
-    logging.info(metadata)
 
     data = {
         "id": str(uuid.uuid4()),
@@ -213,6 +227,21 @@ def get_structured_ai_response(prompt, model='gpt-4o'):
     except Exception as e:
         logging.info(e)
 
+def upload_document(file: func.HttpRequest.files):
+    try:
+        container_name = 'moths-in-the-office'
+        blob_name = file.filename
+
+        blob_service_client = BlobServiceClient.from_connection_string(azure_storage_connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        blob_client = container_client.get_blob_client(blob_name)
+
+        blob_client.upload_blob(file.stream, overwrite=True)
+        return True
+    except Exception as e:
+        logging.info(e)
+        return False
+
 def process_document(content, metadata):
     try:
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
@@ -232,16 +261,14 @@ def process_document(content, metadata):
 
         risk_statements = get_structured_ai_response(prompt)
 
-        connection_string = os.environ["031b3f_STORAGE"]
         container_name = "risk-store"
         blob_name = "possible-risk-statements.json"
 
-        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        blob_service_client = BlobServiceClient.from_connection_string(azure_storage_connection_string)
         container_client = blob_service_client.get_container_client(container_name)
         blob_client = container_client.get_blob_client(blob_name)
 
         blob_data = blob_client.download_blob().readall().decode('utf-8')
-        logging.info(blob_data)
 
         result_data = metadata | json.loads(risk_statements)
         result_data = [result_data]
