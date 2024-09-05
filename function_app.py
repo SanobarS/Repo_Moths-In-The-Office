@@ -91,7 +91,7 @@ def upload_document(req: func.HttpRequest) -> func.HttpResponse:
         return {'error': 'No file selected for uploading'}, 400
 
     if upload_document(file):
-        return func.HttpResponse('success', status_code=200)
+        return func.HttpResponse(status_code=200)
     else:
         return func.HttpResponse(status_code=500)
 
@@ -110,7 +110,18 @@ def trigger_risk_analytics(myblob: func.InputStream):
     }
     
     process_document(content, metadata)
+
+@app.route(route="get_ai_risk_suggestions", auth_level=func.AuthLevel.FUNCTION)
+def get_ai_risk_suggestions(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function processed a request.')
+
+    res_ai_risk_suggestions = ai_risk_suggestions()
     
+    if res_ai_risk_suggestions:
+        return func.HttpResponse(json.dumps(res_ai_risk_suggestions), mimetype="application/json", status_code=200)
+    else:
+        return func.HttpResponse(status_code=500)
+
 
 ############## HELPERS ##############
 def risk_description(risk_statement):
@@ -242,6 +253,16 @@ def upload_document(file: func.HttpRequest.files):
         logging.info(e)
         return False
 
+def get_risk_blob_client():
+    container_name = "risk-store"
+    blob_name = "possible-risk-statements.json"
+
+    blob_service_client = BlobServiceClient.from_connection_string(azure_storage_connection_string)
+    container_client = blob_service_client.get_container_client(container_name)
+    blob_client = container_client.get_blob_client(blob_name)
+
+    return blob_client
+
 def process_document(content, metadata):
     try:
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
@@ -261,13 +282,7 @@ def process_document(content, metadata):
 
         risk_statements = get_structured_ai_response(prompt)
 
-        container_name = "risk-store"
-        blob_name = "possible-risk-statements.json"
-
-        blob_service_client = BlobServiceClient.from_connection_string(azure_storage_connection_string)
-        container_client = blob_service_client.get_container_client(container_name)
-        blob_client = container_client.get_blob_client(blob_name)
-
+        blob_client = get_risk_blob_client()
         blob_data = blob_client.download_blob().readall().decode('utf-8')
 
         result_data = metadata | json.loads(risk_statements)
@@ -279,5 +294,15 @@ def process_document(content, metadata):
 
         blob_client.upload_blob(json.dumps(result_data), overwrite=True)
         logging.info('possible-risk-statements updated')
+    except Exception as e:
+        logging.info(e)
+
+
+def ai_risk_suggestions():
+    try:
+        blob_client = get_risk_blob_client()
+        blob_data = blob_client.download_blob().readall().decode('utf-8')
+
+        return json.loads(blob_data)
     except Exception as e:
         logging.info(e)
