@@ -59,7 +59,7 @@ def get_risk_matrices(req: func.HttpRequest) -> func.HttpResponse:
     if not res_risk_matrices:
         return func.HttpResponse(status_code=500)
     else:
-        return func.HttpResponse(res_risk_matrices, status_code=200)
+        return func.HttpResponse(res_risk_matrices, mimetype="application/json", status_code=200)
     
 
 @app.route(route="get_risk_controls", auth_level=func.AuthLevel.FUNCTION)
@@ -76,7 +76,7 @@ def get_risk_controls(req: func.HttpRequest) -> func.HttpResponse:
     if not res_risk_controls:
         return func.HttpResponse(status_code=500)
     else:
-        return func.HttpResponse(res_risk_controls, status_code=200)
+        return func.HttpResponse(res_risk_controls, mimetype="application/json", status_code=200)
     
 
 @app.route(route="upload_document", auth_level=func.AuthLevel.FUNCTION)
@@ -159,20 +159,23 @@ def risk_matrices(risk_statement):
             results = index.query(vector=statement_embeddings, top_k=10, include_metadata=True, namespace='ns1')
             prompt = ('You are a risk manager. Provide all possible risk matrices based on the given context. \n'
                     f'risk_statement:{risk_statement}\n'
-                    'Json format for risk matrices to be returned: {'
-                    '                                                  "Risk_Title": "Risk_Title",'
-                    '                                                  "Likelihood": "Range 1(LOW)-5(HIGH)",'
-                    '                                                  "Impact": "Range 1(LOW)-5(HIGH)",'
-                    '                                                  "Control_Measure": "JSON array of control Suggestions in key value pair of control_title and control_description"'
-                    '                                              }. ')
+                    #'Domain: Healthcare and legal\n'
+                    'Json format for risk matrices to be returned:{"risks": [{'
+                    '                                                  "risk_title": "risk_title",'
+                    '                                                  "risk_sector": "risk_sector",'
+                    '                                                  "likelihood": "Range 1(LOW)-5(HIGH)",'
+                    '                                                  "impact": "Range 1(LOW)-5(HIGH)",'
+                    '                                                  "control_measures": "JSON array of control Suggestions in key value pair of control_title and control_description"'
+                    '                                              }]}. ')
 
             prompt += '\ncontext: '
             for match in results['matches']:
                 prompt += '\n' + match['metadata']['chunk']
 
-            prompt += '\nDo not include risk matrices for which Risk_Title is not relevant to the given risk_statement'
+            prompt += '\nDo not include risk matrices for which Risk_Title is not relevant to the given risk_statement.'
+            prompt += 'JSON: '
 
-            risk_matrices = get_ai_response(prompt)
+            risk_matrices = get_structured_ai_response(prompt)
 
             return risk_matrices
         else:
@@ -192,9 +195,9 @@ def risk_controls(risk):
         prompt += '\nrisk_title: ' + risk["risk_title"]
         prompt += '\nrisk_controls: ' + ", ".join(risk["risk_controls"]) + "."
 
-        prompt += '\nJSON array of control Suggestions in key value pair of control_title and control_description: '  
+        prompt += '\nJSON array of control_measures in key value pair of control_title and control_description: '  
 
-        risk_controls = get_ai_response(prompt)
+        risk_controls = get_structured_ai_response(prompt)
 
         return risk_controls
     except Exception as e:
