@@ -23,6 +23,12 @@ completionClient = AzureOpenAI(
         azure_endpoint='https://ai-vista2024.openai.azure.com'
     )
 
+imageClient = AzureOpenAI(
+        api_key='4331547453b740eb954b45ed37389fc0',
+        api_version='2024-02-01',
+        azure_endpoint='https://ai-vista2024.openai.azure.com'
+    )
+
 embeddingsClient = AzureOpenAI(
     api_key='4331547453b740eb954b45ed37389fc0',
     azure_endpoint='https://ai-vista2024.openai.azure.com',
@@ -43,7 +49,7 @@ def get_risk_description(req: func.HttpRequest) -> func.HttpResponse:
     if not res_risk_description:
         return func.HttpResponse(status_code=500)
     else:
-        return func.HttpResponse(res_risk_description, status_code=200)
+        return func.HttpResponse(res_risk_description, mimetype="application/json", status_code=200)
 
 
 @app.route(route="get_risk_matrices", auth_level=func.AuthLevel.FUNCTION)
@@ -89,9 +95,12 @@ def upload_document(req: func.HttpRequest) -> func.HttpResponse:
     
     if file.filename == '':
         return {'error': 'No file selected for uploading'}, 400
+    
+    metadata = upload_document(file)
 
-    if upload_document(file):
-        return func.HttpResponse(status_code=200)
+    if metadata:
+        risk_statements = process_document(metadata["content"], metadata, True)
+        return func.HttpResponse(risk_statements, mimetype="application/json", status_code=200)
     else:
         return func.HttpResponse(status_code=500)
 
@@ -109,7 +118,7 @@ def trigger_risk_analytics(myblob: func.InputStream):
         "url": myblob.uri
     }
     
-    process_document(content, metadata)
+    process_document(content, metadata, False)
 
 @app.route(route="get_ai_risk_suggestions", auth_level=func.AuthLevel.FUNCTION)
 def get_ai_risk_suggestions(req: func.HttpRequest) -> func.HttpResponse:
@@ -122,11 +131,54 @@ def get_ai_risk_suggestions(req: func.HttpRequest) -> func.HttpResponse:
     else:
         return func.HttpResponse(status_code=500)
 
+@app.route(route="generate_heatmap_image", auth_level=func.AuthLevel.FUNCTION)
+def generate_heatmap_image(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function processed a request.')
+
+    risks = req.get_json()
+    
+    if not risks:
+        return func.HttpResponse("Risk missing in the request.", status_code=400)
+    
+    heatmap_image_url = report_html(risks)
+
+    if heatmap_image_url:
+        return func.HttpResponse(heatmap_image_url, status_code=200)
+    else:
+        return func.HttpResponse(status_code=500)
+    
+@app.route(route="save_to_risk_register", auth_level=func.AuthLevel.FUNCTION)
+def save_to_risk_register(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function processed a request.')
+
+    risk = req.get_json()
+
+    if not risk:
+        return func.HttpResponse("Risk missing in the request.", status_code=400)
+    
+    risk["id"] = str(uuid.uuid4())   
+
+    if func_save_to_risk_register(risk):
+        metadata = {
+            "id": risk["id"]
+        }
+        risk_statement_embeddings = get_embedding(risk["risk_statement"], metadata)
+        risk_description_embeddings = get_embedding(risk["risk_description"], metadata)
+
+        vectors = [risk_statement_embeddings, risk_description_embeddings]
+
+        index.upsert(vectors=vectors, namespace="risk-register")
+
+        return func.HttpResponse(status_code=200)
+    else:
+        return func.HttpResponse(status_code=500)
+
+
 
 ############## HELPERS ##############
 def risk_description(risk_statement):
-    try:
-        prompt = 'You are a risk manager. Provide a risk description based on the given risk_statement and context. Provide description in 100 words and do not include any control measures.'
+    try:        
+        prompt = 'You are a risk manager. Provide a risk_matrix based on the given risk_statement and context.'
         prompt += '\nrisk_statement: ' + risk_statement
 
         context = index.query(
@@ -140,9 +192,14 @@ def risk_description(risk_statement):
         contextText = [item['chunk'] for item in chunks]
 
         prompt += '\ncontext: ' + ','.join(contextText)
-        prompt += '\nRisk Description: '
+        prompt += ('Json format for risk_matrix to be returned:{"risk": [{'
+'												   "risk_description": "Risk description in 100 words.",'
+'                                                  "likelihood": "Range 1(LOW)-5(HIGH)",'
+'                                                  "impact": "Range 1(LOW)-5(HIGH)",'
+'                                                  "control_measures": "JSON array of 3 most effective control Suggestions in key value pair of control_title and control_description"'
+'                                              }]}. ')
 
-        risk_description = get_ai_response(prompt)
+        risk_description = get_structured_ai_response(prompt)
 
         return risk_description
     except Exception as e:
@@ -241,6 +298,23 @@ def get_structured_ai_response(prompt, model='gpt-4o'):
     except Exception as e:
         logging.info(e)
 
+def get_image_ai_response(prompt, model='Dalle3'):
+    try:
+        result = imageClient.images.generate(
+                    model=model,
+                    prompt=prompt,
+                    size="1024x1024",
+                    quality="standard",
+                    n=1
+                )
+        
+        logging.info(result)
+
+        return json.loads(result.model_dump_json())['data'][0]['url']
+
+    except Exception as e:
+        logging.info(e)
+
 def upload_document(file: func.HttpRequest.files):
     try:
         container_name = 'moths-in-the-office'
@@ -251,22 +325,29 @@ def upload_document(file: func.HttpRequest.files):
         blob_client = container_client.get_blob_client(blob_name)
 
         blob_client.upload_blob(file.stream, overwrite=True)
-        return True
+
+        metadata = {
+            "filename": blob_name,
+            "url": blob_client.url,
+            "content": blob_client.download_blob().readall().decode('utf-8')
+        }
+
+        return metadata
     except Exception as e:
         logging.info(e)
-        return False
+        return None
 
-def get_risk_blob_client():
+def get_risk_blob_client(blob_name = "possible-risk-statements.json"):
     container_name = "risk-store"
-    blob_name = "possible-risk-statements.json"
 
     blob_service_client = BlobServiceClient.from_connection_string(azure_storage_connection_string)
     container_client = blob_service_client.get_container_client(container_name)
     blob_client = container_client.get_blob_client(blob_name)
 
     return blob_client
+    
 
-def process_document(content, metadata):
+def process_document(content, metadata, getSuggestionResponse=True):
     try:
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
         docs = text_splitter.split_documents([Document(page_content=content)])
@@ -284,6 +365,9 @@ def process_document(content, metadata):
         prompt += '\n' + content
 
         risk_statements = get_structured_ai_response(prompt)
+
+        if getSuggestionResponse:
+            return risk_statements
 
         blob_client = get_risk_blob_client()
         blob_data = blob_client.download_blob().readall().decode('utf-8')
@@ -309,3 +393,58 @@ def ai_risk_suggestions():
         return json.loads(blob_data)
     except Exception as e:
         logging.info(e)
+
+
+def heatmap_image(risks):
+    try:
+        prompt = ('I NEED to test how the tool works with extremely simple prompts. DO NOT add any detail, just use it AS-IS:'
+                  'Based on the provided risk_Details, Create a risk heatmap matrix with a 5x5 grid. '
+                  'The x-axis represents "Impact" (from 1 to 5), and the y-axis represents "Likelihood" '
+                  '(from 1 to 5). Use a color gradient ranging from green (low risk) to red (high risk). '
+                  'Highlight certain cells based on specific risk values provided, and include a title '
+                  '"Risk Heatmap Matrix." Ensure both axes are labeled, and add a color bar to indicate '
+                  'the risk count in each cell. Make it visually clear and easy to interpret.')
+        prompt += '\nrisk_Details: ' + json.dumps(risks)
+        logging.info(prompt)
+
+        image_url = get_image_ai_response(prompt)
+
+        return image_url
+    except Exception as e:
+        logging.info(e)
+
+
+def report_html(risk):
+    try:
+        prompt = ('You are a risk manager. Generate a risk report in html format that can be easily understood '
+                  'and professional in nature. Include risk_statement and risk_description at the top of the '
+                  'document. Then based on the risk_matrices, explain each Risk_Title and Control_Measure with '
+                  'a small description. Along with descriptions, generate a risk matrix of 5X5 for Impact and '
+                  'Likelihood for each risk with color code. Highlight the cell having the value (Impact x Likelihood) for the given risk in the matrix. '
+                  )
+        prompt += '\nrisk_statement: ' + risk["risk_statement"]
+        prompt += '\nrisk_description: ' + risk["risk_description"]
+        prompt += '\nrisk_Details: ' + json.dumps(risk['risks'])
+        logging.info(prompt)
+
+        content = get_ai_response(prompt)
+
+        return content
+    except Exception as e:
+        logging.info(e)
+
+def func_save_to_risk_register(risk):
+    try:
+        blob_client = get_risk_blob_client("risk_register.json")
+        blob_data = blob_client.download_blob().readall().decode('utf-8')
+
+        if len(blob_data) > 0:
+                blob_data = json.loads(blob_data)
+                risk = blob_data + [risk]
+
+        blob_client.upload_blob(json.dumps(risk), overwrite=True)
+        logging.info('risk_register updated')
+        return True
+    except Exception as e:
+        logging.info(e)
+        return False
