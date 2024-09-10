@@ -155,7 +155,7 @@ def save_to_risk_register(req: func.HttpRequest) -> func.HttpResponse:
 
     if not risk:
         return func.HttpResponse("Risk missing in the request.", status_code=400)
-    
+
     risk["id"] = str(uuid.uuid4())   
 
     if func_save_to_risk_register(risk):
@@ -172,7 +172,17 @@ def save_to_risk_register(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(status_code=200)
     else:
         return func.HttpResponse(status_code=500)
+    
 
+@app.route(route="suggestions_from_risk_register", auth_level=func.AuthLevel.FUNCTION)
+def suggestions_from_risk_register(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function processed a request.')
+
+    risk_statement = req.params.get('risk_statement')
+
+    risk_suggestions = func_suggestions_from_risk_register(risk_statement)
+
+    return func.HttpResponse(json.dumps(risk_suggestions), mimetype="application/json", status_code=200)
 
 
 ############## HELPERS ##############
@@ -438,9 +448,11 @@ def func_save_to_risk_register(risk):
         blob_client = get_risk_blob_client("risk_register.json")
         blob_data = blob_client.download_blob().readall().decode('utf-8')
 
+        risk = [risk]
+
         if len(blob_data) > 0:
-                blob_data = json.loads(blob_data)
-                risk = blob_data + [risk]
+            blob_data = json.loads(blob_data)
+            risk = blob_data + risk
 
         blob_client.upload_blob(json.dumps(risk), overwrite=True)
         logging.info('risk_register updated')
@@ -448,3 +460,52 @@ def func_save_to_risk_register(risk):
     except Exception as e:
         logging.info(e)
         return False
+    
+def func_suggestions_from_risk_register(risk_statement):
+    try:
+        prompt = 'You are a risk manager. Based on the given risk_statement, find the most relavent risk. Do not return anything if there is no match.'
+        prompt += '\nrisk_statement: ' + risk_statement
+
+        context = index.query(
+            namespace='risk-register',
+            vector=get_embedding(prompt)['values'],
+            top_k=3,
+            include_metadata=True
+        )
+
+        chunks = [item["metadata"] for item in context['matches']]
+        blob_client = get_risk_blob_client("risk_register.json")
+        blob_data = blob_client.download_blob().readall().decode('utf-8')
+
+        risk_matches = []
+        if len(blob_data) > 0:
+            risk_data = json.loads(blob_data)
+            for chunk in chunks:
+                duplicate_match = [risk for risk in risk_matches if risk["id"] == chunk['id']]
+
+                if not duplicate_match:
+                    relevance_prompt = "risk_statement:" + risk_statement
+                    relevance_prompt += "\nsuggested_risk_statement:" + chunk['chunk']
+                    relevance_prompt += "\nIs the risk_statement and suggested_risk_statement related? Rank their relevance on a scale of 1-100%."
+                    relevance_prompt += "\nReturn result in json format: { 'is_related': 'true/false', 'relevance_score': '1-100' }"
+
+                    relevance = get_structured_ai_response(relevance_prompt)
+                    relevance = json.loads(relevance)
+
+                    if relevance['is_related'].lower() == "true":
+                        risk_match = [risk for risk in risk_data if risk["id"] == chunk['id']]
+                        if len(risk_match) > 0:
+                            risk_match = risk_match[0]
+                            risk_match["relevance_score"] = relevance["relevance_score"]
+                            risk_matches.append(risk_match)
+
+        return risk_matches
+    except Exception as e:
+        logging.info(e)  
+
+
+def generate_html_report():
+    try:
+        return
+    except Exception as e:
+        logging.info(e) 
