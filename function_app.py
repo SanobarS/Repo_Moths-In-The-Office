@@ -184,6 +184,14 @@ def suggestions_from_risk_register(req: func.HttpRequest) -> func.HttpResponse:
 
     return func.HttpResponse(json.dumps(risk_suggestions), mimetype="application/json", status_code=200)
 
+@app.route(route="generate_report", auth_level=func.AuthLevel.FUNCTION)
+def generate_report(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Python HTTP trigger function processed a request.')
+
+    report_content = generate_html_report()
+
+    return func.HttpResponse(report_content,  mimetype="text/html", status_code=200)
+
 
 ############## HELPERS ##############
 def risk_description(risk_statement):
@@ -506,6 +514,35 @@ def func_suggestions_from_risk_register(risk_statement):
 
 def generate_html_report():
     try:
-        return
+        blob_client = get_risk_blob_client("risk_register.json")
+        risks_data = blob_client.download_blob().readall().decode('utf-8')
+
+        prompt = ('You are a risk manager. Based on the given details. Generate a risk report in html format.'
+                  'The report should be easy to read and understand.'
+                  'Generate Risk heatmap chart in html format.'
+                  'Consider the given html_template for report generation.')
+        prompt += '\nRisks: ' + risks_data
+        prompt += '\nhtml_template:\n' + get_report_template()
+
+        content = get_ai_response(prompt)
+
+        start_string = "<html>"
+        end_string = "</html>"
+        start_index = content.find(start_string)
+        end_index = content.find(end_string)
+
+        html_content = content[start_index:end_index+len(end_string)-1]
+        logging.info("###########################")
+        logging.info(html_content)
+        
+        return html_content
     except Exception as e:
         logging.info(e) 
+
+
+def get_report_template():
+    file_path = 'report_template.html'
+
+    with open(file_path, "r") as file:
+        content = file.read()
+        return content
