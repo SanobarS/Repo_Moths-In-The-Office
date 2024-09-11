@@ -118,7 +118,7 @@ def trigger_risk_analytics(myblob: func.InputStream):
         "url": myblob.uri
     }
     
-    process_document(content, metadata, False)
+    #process_document(content, metadata, False)
 
 @app.route(route="get_ai_risk_suggestions", auth_level=func.AuthLevel.FUNCTION)
 def get_ai_risk_suggestions(req: func.HttpRequest) -> func.HttpResponse:
@@ -189,8 +189,10 @@ def generate_report(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a request.')
 
     report_content = generate_html_report()
+    
+    report_url = save_report(report_content)
 
-    return func.HttpResponse(report_content,  mimetype="text/html", status_code=200)
+    return func.HttpResponse(report_url, status_code=200)
 
 
 ############## HELPERS ##############
@@ -355,9 +357,7 @@ def upload_document(file: func.HttpRequest.files):
         logging.info(e)
         return None
 
-def get_risk_blob_client(blob_name = "possible-risk-statements.json"):
-    container_name = "risk-store"
-
+def get_risk_blob_client(blob_name = "possible-risk-statements.json", container_name = "risk-store"):
     blob_service_client = BlobServiceClient.from_connection_string(azure_storage_connection_string)
     container_client = blob_service_client.get_container_client(container_name)
     blob_client = container_client.get_blob_client(blob_name)
@@ -546,3 +546,12 @@ def get_report_template():
     with open(file_path, "r") as file:
         content = file.read()
         return content
+    
+def save_report(report_content):
+    try:
+        blob_client = get_risk_blob_client("latest_risk_report.html", "risk-reports")
+        blob_client.upload_blob(report_content, overwrite=True)
+
+        return blob_client.url
+    except Exception as e:
+        logging.info(e) 
